@@ -1,18 +1,22 @@
 """
 telegram bulk sender bot — group + admin restricted, Render-ready
-commands (groups only, admins only):
-  /bulk <message> <count>          repeat <message> <count> times
-  /bulk <count>  (as reply)        repeat replied message <count> times
-  /mention @username [count]       ping a user
-  /all [count]                     ping everyone tracked in this chat
-  /all user1,user2 [count]         ping an explicit list
-  /stop                            abort running job
-  /help                            usage
+master admin: 8919487892 (can't be removed)
+commands:
+  /bulk <message> <count>
+  /bulk <count>  (as reply)
+  /mention @username [count]
+  /all [count]
+  /all user1,user2 [count]
+  /stop
+  /addadmin <user_id>
+  /removeadmin <user_id>
+  /admins
+  /help
 
 env:
   BOT_TOKEN   bot token
-  ADMIN_IDS   extra user ids allowed (comma-separated) — supergroup/group admins always allowed
-  STATE_DIR   path for seen.json (default ./data)
+  ADMIN_IDS   extra user ids to seed on first boot (comma-separated)
+  STATE_DIR   path for state files (default ./data)
   PORT        health port (default 8080)
 """
 import json
@@ -26,36 +30,45 @@ import requests
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8694449874:AAF7BilyqATOSud6EZukG-N6OCTwSh0sFhs")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-EXTRA_ADMINS = {
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
-}
+MASTER_ADMINS = {8919487892}
+SEED_ADMINS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+
 STATE_DIR = os.getenv("STATE_DIR", "./data")
 SEEN_PATH = os.path.join(STATE_DIR, "seen.json")
+ADMINS_PATH = os.path.join(STATE_DIR, "admins.json")
 PORT = int(os.getenv("PORT", "8080"))
 
 MAX_COUNT = 1000
 DELAY = 0.05
 PROGRESS_EVERY = 50
-MEMBER_CACHE_TTL = 60  # seconds
+MEMBER_CACHE_TTL = 60
 
 SEEN: dict = {}
 ACTIVE: dict = {}
+EXTRA_ADMINS: set = set()
 SEEN_LOCK = threading.Lock()
+ADMINS_LOCK = threading.Lock()
 ACTIVE_LOCK = threading.Lock()
-MEMBER_CACHE: dict = {}  # (chat_id, user_id) -> (status, ts)
+MEMBER_CACHE: dict = {}
 CACHE_LOCK = threading.Lock()
 
 
 # ---------- persistence ----------
 
-def load_seen():
-    global SEEN
+def load_state():
+    global SEEN, EXTRA_ADMINS
     try:
         with open(SEEN_PATH, "r", encoding="utf-8") as f:
             SEEN = {int(k): {int(uid): u for uid, u in v.items()}
                     for k, v in json.load(f).items()}
     except Exception:
         SEEN = {}
+    try:
+        with open(ADMINS_PATH, "r", encoding="utf-8") as f:
+            EXTRA_ADMINS = set(json.load(f))
+    except Exception:
+        EXTRA_ADMINS = set()
+    EXTRA_ADMINS |= SEED_ADMINS
 
 
 def save_seen():
@@ -69,14 +82,28 @@ def save_seen():
             json.dump(blob, f)
         os.replace(tmp, SEEN_PATH)
     except Exception as e:
-        print("[persist]", e)
+        print("[persist/seen]", e)
+
+
+def save_admins():
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with ADMINS_LOCK:
+            blob = sorted(EXTRA_ADMINS)
+        tmp = ADMINS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(blob, f)
+        os.replace(tmp, ADMINS_PATH)
+    except Exception as e:
+        print("[persist/admins]", e)
 
 
 # ---------- telegram api ----------
 
 def call(method, **params):
+    clean = {k: v for k, v in params.items() if v is not None}
     try:
-        r = requests.post(f"{API}/{method}", json=params, timeout=30)
+        r = requests.post(f"{API}/{method}", json=clean, timeout=30)
         return r.json()
     except Exception as e:
         return {"ok": False, "description": str(e)}
@@ -101,10 +128,19 @@ def get_updates(offset=None, timeout=30):
         return {"ok": False, "result": [], "description": str(e)}
 
 
+# ---------- auth ----------
+
+def is_global_admin(user_id):
+    if user_id in MASTER_ADMINS:
+        return True
+    with ADMINS_LOCK:
+        return user_id in EXTRA_ADMINS
+
+
 def is_group_admin(chat_id, user_id):
     if not user_id:
         return False
-    if user_id in EXTRA_ADMINS:
+    if is_global_admin(user_id):
         return True
     key = (chat_id, user_id)
     now = time.time()
@@ -149,7 +185,7 @@ def _run_bulk(chat_id, text, count, parse_mode, status_id, stop_evt, label):
             sent += 1
         else:
             if first_err is None:
-                first_err = resp.get("description", "unknown error")
+                first_err = resp.get("description", "unknown")
             retry = resp.get("parameters", {}).get("retry_after")
             if retry:
                 time.sleep(retry)
@@ -187,7 +223,7 @@ def start_job(chat_id, text, count, parse_mode, label="bulk"):
     ).start()
 
 
-# ---------- auth gate ----------
+# ---------- gate ----------
 
 def gate(chat_id, user_id, chat_type):
     if chat_type not in ("group", "supergroup"):
@@ -202,7 +238,6 @@ def gate(chat_id, user_id, chat_type):
 # ---------- command parsing ----------
 
 def split_cmd(text, bot_username):
-    """Return (command_name, rest) stripping /cmd@Bot suffix."""
     if not text.startswith("/"):
         return None, ""
     head, _, tail = text.partition(" ")
@@ -232,6 +267,9 @@ def cmd_help(chat_id):
         "/all [count]                   — ping everyone tracked here\n"
         "/all user1,user2 [count]       — ping explicit list\n"
         "/stop                          — abort running job\n"
+        "/addadmin <user_id>            — grant admin\n"
+        "/removeadmin <user_id>         — revoke admin\n"
+        "/admins                        — list admins\n"
         "/help                          — this message",
     )
 
@@ -286,7 +324,6 @@ def cmd_all(chat_id, body):
     if explicit:
         tags = [t if t.startswith("@") else "@" + t for t in explicit]
         text, parse_mode = " ".join(tags), None
-        label = f"all ({len(tags)})"
     else:
         if not users:
             send(chat_id, "no users tracked yet — someone needs to chat first")
@@ -294,9 +331,8 @@ def cmd_all(chat_id, body):
         tags = [mention_of(u) for u in users]
         text = " ".join(tags)
         parse_mode = "HTML" if "<a " in text else None
-        label = f"all ({len(tags)})"
 
-    start_job(chat_id, text, count, parse_mode, label=label)
+    start_job(chat_id, text, count, parse_mode, label=f"all ({len(tags)})")
 
 
 def cmd_stop(chat_id):
@@ -309,9 +345,51 @@ def cmd_stop(chat_id):
     send(chat_id, "stop requested")
 
 
+def cmd_addadmin(chat_id, user_id, body):
+    if user_id not in MASTER_ADMINS:
+        send(chat_id, "only the master admin can add admins")
+        return
+    if not body.isdigit():
+        send(chat_id, "usage: /addadmin <user_id>")
+        return
+    target = int(body)
+    with ADMINS_LOCK:
+        EXTRA_ADMINS.add(target)
+    save_admins()
+    send(chat_id, f"added admin: {target}")
+
+
+def cmd_removeadmin(chat_id, user_id, body):
+    if user_id not in MASTER_ADMINS:
+        send(chat_id, "only the master admin can remove admins")
+        return
+    if not body.isdigit():
+        send(chat_id, "usage: /removeadmin <user_id>")
+        return
+    target = int(body)
+    if target in MASTER_ADMINS:
+        send(chat_id, "can't remove the master admin")
+        return
+    with ADMINS_LOCK:
+        EXTRA_ADMINS.discard(target)
+    save_admins()
+    send(chat_id, f"removed admin: {target}")
+
+
+def cmd_admins(chat_id):
+    with ADMINS_LOCK:
+        extra = sorted(EXTRA_ADMINS)
+    lines = ["master: " + ", ".join(str(x) for x in sorted(MASTER_ADMINS))]
+    if extra:
+        lines.append("extra: " + ", ".join(str(x) for x in extra))
+    else:
+        lines.append("extra: (none)")
+    send(chat_id, "\n".join(lines))
+
+
 # ---------- dispatch ----------
 
-BOT_USERNAME = ""  # fetched at startup
+BOT_USERNAME = ""
 
 
 def handle_message(msg):
@@ -342,6 +420,12 @@ def handle_message(msg):
         cmd_mention(chat_id, body)
     elif cmd == "all":
         cmd_all(chat_id, body)
+    elif cmd == "addadmin":
+        cmd_addadmin(chat_id, user_id, body)
+    elif cmd == "removeadmin":
+        cmd_removeadmin(chat_id, user_id, body)
+    elif cmd == "admins":
+        cmd_admins(chat_id)
 
 
 # ---------- health ----------
@@ -369,7 +453,7 @@ def start_health():
 
 def main():
     global BOT_USERNAME
-    load_seen()
+    load_state()
     start_health()
     call("deleteWebhook")
 
