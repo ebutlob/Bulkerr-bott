@@ -23,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import requests
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8694449874:AAGgokB7g9U5NWbxra0G8C798knfMGronFk")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8694449874:AAF7BilyqATOSud6EZukG-N6OCTwSh0sFhs")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 ADMIN_IDS = {
