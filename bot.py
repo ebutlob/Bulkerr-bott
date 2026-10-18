@@ -1,19 +1,5 @@
 """
 telegram bulk sender bot — group + admin restricted, Render-ready
-master admin: 8919487892 (can't be removed)
-commands:
-  /bulk <message> <count>
-  /bulk <count>  (as reply)
-  /mention @username [count]
-  /all [count]
-  /all user1,user2 [count]
-  /fuck @username  (or reply)
-  /funny
-  /stop
-  /addadmin <user_id>
-  /removeadmin <user_id>
-  /admins
-  /help
 """
 import json
 import os
@@ -40,31 +26,46 @@ DELAY = 0.05
 PROGRESS_EVERY = 50
 MEMBER_CACHE_TTL = 60
 
-GAALIS = [
-    "teri maa ka bhosda",
-    "teri behen ki chut",
-    "madarchod, teri aukaat kya hai?",
-    "bhenchod, chappal se maarning padegi",
+# ---------- joke / roast pools ----------
+INSULTS = [
     "gandu, apni gaand maarwa",
-    "teri maa ki chut, randi ke bachhe",
-    "lodu, chakka, hijda",
-    "bhadwe, teri naani ka bhosda",
-    "tatti khane, teri maa ka bhosda",
-    "teri maa randi, teri behen randi",
-    "suar ke bachhe, gand mara",
-    "chutiya, bhosdike, lodu",
-    "teri maa ke lode, madarchod",
-    "gandu, teri behen ka bhosda"
+    "teri behen ki chut",
+    "teri maa ka bhosda",
+    "madarchod, nikal yahan se",
+    "bhosdike, kaam kar le thoda",
+    "chutiye, dimaag hai ki ghutne mein",
+    "teri maa ko chakki pe pis dunga",
+    "randi ka bachha",
+    "harami, saale, kutte ke pille",
+    "bhenchod, sudhar ja",
+    "lodu, gandh faad dunga",
+    "teri gaand mein danda daal dunga",
+    "saale nalle, kaam dhandha kar",
+    "maa chudane ke liye paida hua hai kya",
+    "gandu, pura khandaan chod dunga",
 ]
 
-SEEN: dict = {}
-ACTIVE: dict = {}
-EXTRA_ADMINS: set = set()
-SEEN_LOCK = threading.Lock()
-ADMINS_LOCK = threading.Lock()
-ACTIVE_LOCK = threading.Lock()
-MEMBER_CACHE: dict = {}
-CACHE_LOCK = threading.Lock()
+JOKES = [
+    "Ek aadmi doctor ke paas gaya bola: 'Doctor sahab, mujhe bhoolne ki bimari hai.' Doctor: 'Kab se?' Aadmi: 'Kya kab se?'",
+    "Wife: 'Tum mujhe kitna pyaar karte ho?' Husband: 'Tumhare bina main kuch nahi hoon.' Wife: 'Aur tumhare paas kya hai?' Husband: 'Tum.' Wife: 'Aur bank balance?' Husband: 'Tumhari bahen.'",
+    "Ek larka ladki ko propose karta hai: 'Tum mere liye chand ho.' Ladki: 'Aur tum mere liye?' Larka: 'Main tumhare liye BSNL hoon, network kam aata hai.'",
+    "Teacher: 'Sita ne Ram ke liye agni pariksha di.' Student: 'Sir, Ram ne kya diya?' Teacher: 'Sita ko vanvas.' Student: 'Ye toh aajkal ki shaadi hai.'",
+    "Ek sardar apne dost se: 'Yaar, mujhe pani me dubne ka dar hai.' Dost: 'Toh pani mat piya kar.'",
+    "Santa: 'Banta, meri biwi mujhe chhod ke ja rahi hai.' Banta: 'Kyun?' Santa: 'Kyunki main usse zyada handsome hoon.' Banta: 'Toh woh jealous hai?' Santa: 'Nahi, woh aaina le gayi.'",
+    "Ek aadmi train me chadha aur seat par baith gaya. TTE aaya: 'Ticket?' Aadmi: 'Bhaiya, main toh station master hoon.' TTE: 'Toh train kyun chadhe ho?'",
+    "Doctor: 'Aapko roz subah 5 baje uthna hai.' Patient: 'Aur raat ko sone ka time?' Doctor: 'Woh aapki ichha.' Patient: 'Toh main din mein so jaunga.'",
+    "Ek ladki ne apne boyfriend se poocha: 'Agar main aur meri behen dono dub rahi ho, toh tum kise bachaoge?' Boyfriend: 'Main tumhe.' Ladki: 'Kyun?' Boyfriend: 'Kyunki tumhari behen ko swimming aati hai.'",
+    "Boss: 'Tumhe promotion mil rahi hai.' Employee: 'Wow! Kaunsi post?' Boss: 'Facebook aur Instagram dono handle karna.'",
+    "Ek aadmi mandir gaya. Pandit: 'Mangalwar ko mat aana.' Aadmi: 'Kyun?' Pandit: 'Kyunki mangalwar ko main chhutti pe rehta hoon.'",
+    "Ek ladka ladki se: 'Tumhari aankhein bahut pyari hain.' Ladki: 'Toh?' Ladka: 'Toh kya main inhe nikaal ke le jaun?'",
+    "Pappu: 'Yaar, mujhe ek ladki pasand aa gayi.' Dost: 'Toh usse bol de.' Pappu: 'Bola tha, usne kaha pehle apne baal toh katwa le.'",
+    "Ek teacher ne student se poocha: 'Bharat ki rajdhani kya hai?' Student: 'Dilli.' Teacher: 'Sahi hai, ab batao Dilli ka pin code?' Student: 'Wahin toh problem hai, wahan pehle network nahi aata.'",
+    "Biwi: 'Suno ji, main aajkal dieting kar rahi hoon.' Pati: 'Toh kya khaati ho?' Biwi: 'Sirf salad aur chocolate, kyunki chocolate mein milk hota hai.'",
+]
+
+
+def pick(pool):
+    return random.choice(pool)
 
 
 # ---------- persistence ----------
@@ -181,7 +182,8 @@ def track(chat_id, user):
 
 def mention_of(user):
     if user.get("username"):
-        return f"@{user['username']}"
+        u = user["username"]
+        return f'<a href="https://t.me/{u}">@{u}</a>'
     return f'<a href="tg://user?id={user["id"]}">{user.get("first_name", "user")}</a>'
 
 
@@ -278,10 +280,10 @@ def cmd_help(chat_id):
         "/bulk <message> <count>       — repeat message\n"
         "/bulk <count>  (as reply)      — repeat replied message\n"
         "/mention @user [count]         — ping a user\n"
-        "/all [count]                   — ping everyone tracked + gc admins\n"
+        "/all [count]                   — ping everyone tracked here\n"
         "/all user1,user2 [count]       — ping explicit list\n"
-        "/fuck @user                    — drop a gali on someone\n"
-        "/funny                         — random gali\n"
+        "/fuck [@user]                  — random gaali (optional target)\n"
+        "/funny                         — random joke\n"
         "/stop                          — abort running job\n"
         "/addadmin <user_id>            — grant admin\n"
         "/removeadmin <user_id>         — revoke admin\n"
@@ -314,26 +316,18 @@ def cmd_mention(chat_id, body):
     if not parts:
         send(chat_id, "usage: /mention @username [count]")
         return
-    handle = parts[0] if parts[0].startswith("@") else "@" + parts[0]
+    handle = parts[0].lstrip("@")
+    target = f'<a href="https://t.me/{handle}">@{handle}</a>'
     try:
         count = int(parts[1]) if len(parts) > 1 else 1
     except ValueError:
         count = 1
-    start_job(chat_id, handle, max(1, min(count, MAX_COUNT)), None, label=f"mention {handle}")
+    start_job(chat_id, target, max(1, min(count, MAX_COUNT)), "HTML", label=f"mention @{handle}")
 
 
 def cmd_all(chat_id, body):
-    # Fetch live admins to seed tracker
-    resp = call("getChatAdministrators", chat_id=chat_id)
-    if resp.get("ok"):
-        for adm in resp.get("result", []):
-            if not adm.get("user", {}).get("is_bot"):
-                with SEEN_LOCK:
-                    SEEN.setdefault(chat_id, {})[adm["user"]["id"]] = adm["user"]
-
     with SEEN_LOCK:
         users = list(SEEN.get(chat_id, {}).values())
-        
     tokens = body.split() if body else []
     count, explicit = 1, []
     if tokens:
@@ -347,41 +341,34 @@ def cmd_all(chat_id, body):
     count = max(1, min(count, MAX_COUNT))
 
     if explicit:
-        tags = [t if t.startswith("@") else "@" + t for t in explicit]
-        text, parse_mode = " ".join(tags), None
+        tags = [f'<a href="https://t.me/{t.lstrip("@")}">@{t.lstrip("@")}</a>' for t in explicit]
+        text, parse_mode = " ".join(tags), "HTML"
     else:
         if not users:
-            send(chat_id, "no users found — make sure people chat or admins exist")
+            send(chat_id, "no users tracked yet — someone needs to chat first")
             return
         tags = [mention_of(u) for u in users]
         text = " ".join(tags)
-        parse_mode = "HTML" if "<a " in text else None
+        parse_mode = "HTML"
 
     start_job(chat_id, text, count, parse_mode, label=f"all ({len(tags)})")
 
 
-def cmd_fuck(chat_id, body, replied_msg):
-    target = None
-    if replied_msg and replied_msg.get("from"):
-        u = replied_msg["from"]
-        target = mention_of(u)
-    elif body:
-        target = body.split()[0]
-        if not target.startswith("@"):
-            target = "@" + target
-            
-    if not target:
-        send(chat_id, "usage: /fuck @username  (or reply to someone)")
-        return
-        
-    gaali = random.choice(GAALIS)
-    text = f"{target} {gaali}"
-    parse_mode = "HTML" if "<a " in target else None
-    send(chat_id, text, parse_mode=parse_mode)
+def cmd_fuck(chat_id, body):
+    target = body.strip()
+    if target:
+        handle = target.lstrip("@")
+        prefix = f'<a href="https://t.me/{handle}">@{handle}</a>'
+    else:
+        prefix = ""
+    
+    insult = pick(INSULTS)
+    text = f"{prefix} {insult}".strip() if prefix else insult
+    send(chat_id, text, parse_mode="HTML" if prefix else None)
 
 
 def cmd_funny(chat_id):
-    send(chat_id, random.choice(GAALIS))
+    send(chat_id, pick(JOKES))
 
 
 def cmd_stop(chat_id):
@@ -459,8 +446,6 @@ def handle_message(msg):
         return
 
     replied = reply_text_of(msg)
-    replied_msg = msg.get("reply_to_message") or {}
-
     if cmd in ("start", "help"):
         cmd_help(chat_id)
     elif cmd == "stop":
@@ -472,7 +457,7 @@ def handle_message(msg):
     elif cmd == "all":
         cmd_all(chat_id, body)
     elif cmd == "fuck":
-        cmd_fuck(chat_id, body, replied_msg)
+        cmd_fuck(chat_id, body)
     elif cmd == "funny":
         cmd_funny(chat_id)
     elif cmd == "addadmin":
