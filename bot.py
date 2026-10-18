@@ -7,20 +7,17 @@ commands:
   /mention @username [count]
   /all [count]
   /all user1,user2 [count]
+  /fuck @username  (or reply)
+  /funny
   /stop
   /addadmin <user_id>
   /removeadmin <user_id>
   /admins
   /help
-
-env:
-  BOT_TOKEN   bot token
-  ADMIN_IDS   extra user ids to seed on first boot (comma-separated)
-  STATE_DIR   path for state files (default ./data)
-  PORT        health port (default 8080)
 """
 import json
 import os
+import random
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -42,6 +39,23 @@ MAX_COUNT = 1000
 DELAY = 0.05
 PROGRESS_EVERY = 50
 MEMBER_CACHE_TTL = 60
+
+GAALIS = [
+    "teri maa ka bhosda",
+    "teri behen ki chut",
+    "madarchod, teri aukaat kya hai?",
+    "bhenchod, chappal se maarning padegi",
+    "gandu, apni gaand maarwa",
+    "teri maa ki chut, randi ke bachhe",
+    "lodu, chakka, hijda",
+    "bhadwe, teri naani ka bhosda",
+    "tatti khane, teri maa ka bhosda",
+    "teri maa randi, teri behen randi",
+    "suar ke bachhe, gand mara",
+    "chutiya, bhosdike, lodu",
+    "teri maa ke lode, madarchod",
+    "gandu, teri behen ka bhosda"
+]
 
 SEEN: dict = {}
 ACTIVE: dict = {}
@@ -264,8 +278,10 @@ def cmd_help(chat_id):
         "/bulk <message> <count>       — repeat message\n"
         "/bulk <count>  (as reply)      — repeat replied message\n"
         "/mention @user [count]         — ping a user\n"
-        "/all [count]                   — ping everyone tracked here\n"
+        "/all [count]                   — ping everyone tracked + gc admins\n"
         "/all user1,user2 [count]       — ping explicit list\n"
+        "/fuck @user                    — drop a gali on someone\n"
+        "/funny                         — random gali\n"
         "/stop                          — abort running job\n"
         "/addadmin <user_id>            — grant admin\n"
         "/removeadmin <user_id>         — revoke admin\n"
@@ -307,8 +323,17 @@ def cmd_mention(chat_id, body):
 
 
 def cmd_all(chat_id, body):
+    # Fetch live admins to seed tracker
+    resp = call("getChatAdministrators", chat_id=chat_id)
+    if resp.get("ok"):
+        for adm in resp.get("result", []):
+            if not adm.get("user", {}).get("is_bot"):
+                with SEEN_LOCK:
+                    SEEN.setdefault(chat_id, {})[adm["user"]["id"]] = adm["user"]
+
     with SEEN_LOCK:
         users = list(SEEN.get(chat_id, {}).values())
+        
     tokens = body.split() if body else []
     count, explicit = 1, []
     if tokens:
@@ -326,13 +351,37 @@ def cmd_all(chat_id, body):
         text, parse_mode = " ".join(tags), None
     else:
         if not users:
-            send(chat_id, "no users tracked yet — someone needs to chat first")
+            send(chat_id, "no users found — make sure people chat or admins exist")
             return
         tags = [mention_of(u) for u in users]
         text = " ".join(tags)
         parse_mode = "HTML" if "<a " in text else None
 
     start_job(chat_id, text, count, parse_mode, label=f"all ({len(tags)})")
+
+
+def cmd_fuck(chat_id, body, replied_msg):
+    target = None
+    if replied_msg and replied_msg.get("from"):
+        u = replied_msg["from"]
+        target = mention_of(u)
+    elif body:
+        target = body.split()[0]
+        if not target.startswith("@"):
+            target = "@" + target
+            
+    if not target:
+        send(chat_id, "usage: /fuck @username  (or reply to someone)")
+        return
+        
+    gaali = random.choice(GAALIS)
+    text = f"{target} {gaali}"
+    parse_mode = "HTML" if "<a " in target else None
+    send(chat_id, text, parse_mode=parse_mode)
+
+
+def cmd_funny(chat_id):
+    send(chat_id, random.choice(GAALIS))
 
 
 def cmd_stop(chat_id):
@@ -410,6 +459,8 @@ def handle_message(msg):
         return
 
     replied = reply_text_of(msg)
+    replied_msg = msg.get("reply_to_message") or {}
+
     if cmd in ("start", "help"):
         cmd_help(chat_id)
     elif cmd == "stop":
@@ -420,6 +471,10 @@ def handle_message(msg):
         cmd_mention(chat_id, body)
     elif cmd == "all":
         cmd_all(chat_id, body)
+    elif cmd == "fuck":
+        cmd_fuck(chat_id, body, replied_msg)
+    elif cmd == "funny":
+        cmd_funny(chat_id)
     elif cmd == "addadmin":
         cmd_addadmin(chat_id, user_id, body)
     elif cmd == "removeadmin":
